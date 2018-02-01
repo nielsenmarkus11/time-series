@@ -87,3 +87,9 @@ pairs(dat[,-1])
 
 plot(dat$date,dat$inversion,type = 'l', ylim = c(-20,60))
 lines(dat$date,dat$pm2.5,col='red')
+
+fit1 <- lm(pm2.5~inversion+wind+precip,data=dat)
+summary(fit1)
+
+dat$resid[!is.na(dat$pm2.5)] <- resid(fit1)
+plot(dat$date,dat$resid)
