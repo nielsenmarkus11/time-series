@@ -1,6 +1,7 @@
 library(tidyverse)
 library(leaflet)
 library(lubridate)
+library(randomForest)
 library(forecast)
 library(prophet)
 
@@ -88,8 +89,25 @@ pairs(dat[,-1])
 plot(dat$date,dat$inversion,type = 'l', ylim = c(-20,60))
 lines(dat$date,dat$pm2.5,col='red')
 
+# Fit a linear model
 fit1 <- lm(pm2.5~inversion+wind+precip,data=dat)
 summary(fit1)
 
 dat$resid[!is.na(dat$pm2.5)] <- resid(fit1)
 plot(dat$date,dat$resid)
+# residual plots look suspicious
+
+# Fit a random forest
+fit2 <- randomForest(pm2.5~inversion+wind+precip,data=dat[!is.na(dat$pm2.5),], ntree=500, )
+dat$rf.resid[!is.na(dat$pm2.5)] <- fit2$predicted - dat$pm2.5[!is.na(dat$pm2.5)]
+plot(dat$date,dat$rf.resid)
+abline(h=0)
+# Better but we still have some odd things going on in our data
+
+# Zoom In
+par(mfrow=c(1,2))
+plot(dat$date,dat$rf.resid,xlim=c(as.Date(c("2014-01-01","2014-02-28"))),type='b')
+abline(h=0)
+plot(dat$date,dat$rf.resid,xlim=c(as.Date(c("2017-11-01","2017-12-31"))),type='b')
+abline(h=0)
+
