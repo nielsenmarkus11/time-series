@@ -108,6 +108,7 @@ ggplot(dat,aes(date,resid)) +
   ggtitle("Linear Regression Residuals",
           subtitle = paste0("RMSE: ",round(sqrt(mean(dat$resid^2,na.rm=TRUE)),2)))
 
+Acf(dat$resid, main="ACF of OLS Residuals")
 # residual plots look suspicious
 
 # Fit a random forest
@@ -119,6 +120,9 @@ ggplot(dat,aes(date,rf.resid)) +
   geom_point() + geom_smooth() +
   ggtitle("Random Forest Residuals",
           subtitle = paste0("RMSE: ",round(sqrt(fit2$mse[500]),2)))
+
+
+Acf(dat$rf.resid, main="ACF of RF Residuals")
 
 plot(sqrt(fit2$mse),type="l")
 round(sqrt(fit2$mse[500]),2)
