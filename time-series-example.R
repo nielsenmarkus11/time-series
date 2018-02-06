@@ -1,9 +1,11 @@
 library(tidyverse)
+library(gridExtra)
 library(leaflet)
 library(lubridate)
 library(randomForest)
 library(forecast)
 library(prophet)
+
 
 # Load pollution data
 pm25 <- NULL
@@ -81,67 +83,96 @@ m
 dat <- inversion %>% 
   full_join(pm25.smry, by=c("date"="Date"))
 
+# Output data for presentation
+write.csv(dat,"data/pollution-ts.csv",row.names = FALSE)
+
 Hmisc::describe(dat)
 
 # What is the relationship between variables
 pairs(dat[,-1])
 
-plot(dat$date,dat$inversion,type = 'l', ylim = c(-20,60))
+plot(dat$date,dat$inversion,type = 'l', ylim = c(-20,60),xlab = "", ylab="",
+     main="Inversion Compared to PM 2.5 Levels")
 lines(dat$date,dat$pm2.5,col='red')
+legend('topright',legend = c("Inversion","PM 2.5"), col=c("black","red"), lty=1)
 
 # Fit a linear model
 fit1 <- lm(pm2.5~inversion+wind+precip,data=dat)
 summary(fit1)
 
 dat$resid[!is.na(dat$pm2.5)] <- resid(fit1)
-par(mfrow = c(1,1))
-plot(dat$date,dat$resid)
 
-mean(dat$resid^2,na.rm=TRUE)
+# Plot the residuals
+ggplot(dat,aes(date,resid)) + 
+  geom_point() + geom_smooth() +
+  ggtitle("Linear Regression Residuals",
+          subtitle = paste0("RMSE: ",round(sqrt(mean(dat$resid^2,na.rm=TRUE)),2)))
+
 # residual plots look suspicious
 
 # Fit a random forest
 fit2 <- randomForest(pm2.5~inversion+wind+precip,data=dat[!is.na(dat$pm2.5),], ntree=500)
 dat$rf.resid[!is.na(dat$pm2.5)] <- fit2$predicted - dat$pm2.5[!is.na(dat$pm2.5)]
-plot(dat$date,dat$rf.resid)
-abline(h=0)
 
-plot(fit2$mse,type="l")
-fit2$mse[500]
+# Plot the residuals
+ggplot(dat,aes(date,rf.resid)) + 
+  geom_point() + geom_smooth() +
+  ggtitle("Random Forest Residuals",
+          subtitle = paste0("RMSE: ",round(sqrt(fit2$mse[500]),2)))
+
+plot(sqrt(fit2$mse),type="l")
+round(sqrt(fit2$mse[500]),2)
 # Better but we still have some odd things going on in our data
 
 # Zoom In
-par(mfrow=c(1,2))
-plot(dat$date,dat$rf.resid,xlim=c(as.Date(c("2014-01-01","2014-02-28"))),type='b')
-abline(h=0)
-plot(dat$date,dat$rf.resid,xlim=c(as.Date(c("2017-11-01","2017-12-31"))),type='b')
-abline(h=0)
-par(mfrow=c(1,1))
-plot(dat$date,dat$pm2.5,xlim=c(as.Date(c("2015-04-01","2015-04-30"))),type='b')
-abline(h=0)
+p1 <- ggplot(dat,aes(date,rf.resid)) + 
+  geom_point() + geom_line() +
+  xlim(as.Date(c("2014-01-01","2014-02-28"))) + 
+  geom_abline(slope=0, intercept = 0, lty=2, col = "blue", lwd = 1.25)
 
-# Fill in missing
+p2 <- ggplot(dat,aes(date,rf.resid)) + 
+  geom_point() + geom_line() +
+  xlim(as.Date(c("2017-11-01","2017-12-31"))) + 
+  geom_abline(slope=0, intercept = 0, lty=2, col = "blue", lwd = 1.25)
+
+
+grid.arrange(p1, p2, ncol=2, top="Zoom-in of Random Forest Residuals")
+
+
+# Fill in missing data
 dat$pm2.5[dat$date==as.Date("2015-04-02")]=mean(dat$pm2.5[dat$date %in% as.Date(c("2015-04-01","2015-04-03"))])
 
-# time series
+# time series with 7 day seasonality
 dat.ts <- ts(dat[,5], frequency = 7)
 plot(dat.ts)
 
 # Exponential smoothing model with weekly seasonality
 fit3 <- ets(dat.ts)
-fit4 <- ets(dat.ts,model ="MMM")
+fit4a <- ets(dat.ts,model ="AAA")
+fit4b <- ets(dat.ts,model ="MMM")
 fc3 <- forecast(fit3)
-fc4 <- forecast(fit4)
-par(mfrow=c(2,1))
+fc4a <- forecast(fit4a)
+fc4b <- forecast(fit4b)
+
 plot(fc3)
-plot(fc4)
-par(mfrow=c(1,1))
+plot(fc4a)
+plot(fc4b)
 
-plot(residuals(fit3),xlim=c(1,60))
-fit3$mse
+ets.mod <- rbind(data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit3)), type="Auto"),
+                 data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit4a)), type="Additive"),
+                 data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit4b)), type="Multiplicative"))
 
-plot(residuals(fit4),xlim=c(1,60))
-fit4$mse
+
+ggplot(ets.mod,aes(day,resid)) + 
+  geom_point() + geom_smooth() + 
+  facet_grid(type~.,scales="free")+
+  ggtitle("Exponential Smoothing Model Residuals with Weekly Seasonality",
+          subtitle = paste0("Auto RMSE: ",round(sqrt(fit3$mse),2),
+                            "   Additive RMSE: ",round(sqrt(fit4a$mse),2),
+                            "   Multiplicative RMSE: ",round(sqrt(fit4b$mse),2)))
+
+
+
 
 # TBATS model with weekly and yearly seasonality
 dat.ts2 <- msts(dat[!is.na(dat$pm2.5),5], seasonal.periods=c(7,365.25))
@@ -149,12 +180,12 @@ fit5 <- tbats(dat.ts2)
 fc5 <- forecast(fit5)
 plot(fc5)
 
-plot(residuals(fit5),xlim=c(1,1.5))
-abline(h=0)
 
-mean((residuals(fit5))^2)
-
-
+tbats.mod <- data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit5)))
+ggplot(tbats.mod,aes(day,resid)) + 
+  geom_point() + geom_smooth() + 
+  ggtitle("TBATS Model Residuals with Weekly and Yearly Seasonality",
+          subtitle = paste0("Auto RMSE: ",round(sqrt(mean((residuals(fit5))^2)),2)))
 
 
 # ARIMA with weekly and yearly seasonality with regressors
@@ -167,10 +198,11 @@ fit <- auto.arima(dat.ts2, xreg=cbind(z,regs), seasonal=FALSE)
 fc <- forecast(fit, xreg=cbind(zf,fregs), h=25)
 plot(fc,xlim=c(4.8,5.2))
 
-mean((residuals(fit))^2)
-
-
-
+arima.mod <- data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit)))
+ggplot(arima.mod,aes(day,resid)) + 
+  geom_point() + geom_smooth() + 
+  ggtitle("Arima Model Residuals with Seasonality and Regressors",
+          subtitle = paste0("RMSE: ",round(sqrt(mean((residuals(fit))^2)),2)))
 
 
 
@@ -185,15 +217,41 @@ fdat <-  data.frame(ds=dat$date,
                     precip=dat$precip,
                     wind=dat$wind,
                     inversion=dat$inversion)[complete.cases(dat[,2:4]),]
-fit6 <- prophet()
-fit6 <- add_regressor(fit6,'precip')
-fit6 <- add_regressor(fit6,'wind')
-fit6 <- add_regressor(fit6,'inversion')
-fit6 <- fit.prophet(fit6,pdat)
+
+fit6 <- prophet() %>% 
+  add_regressor('precip') %>% 
+  add_regressor('wind') %>% 
+  add_regressor('inversion') %>% 
+  fit.prophet(pdat)
+
+summary(fit6)
 
 forecast <- predict(fit6, fdat)
+fpred <- predict(fit6)
+fpred$ds <- as.Date(fpred$ds)
+fpred <- pdat %>% left_join(fpred,by="ds")
+fpred$resid <- fpred$y - fpred$yhat
+
+
+ggplot(fpred,aes(ds,resid)) + 
+  geom_point() + geom_smooth() + 
+  ggtitle("Prophet with Seasonality and Regressors",
+          subtitle = paste0("RMSE: ",round(sqrt(mean(fpred$resid^2)),2)))
+
 
 plot(fit6, forecast)
 prophet_plot_components(fit6, forecast)
 
+
+
 fit.cv <- cross_validation(fit6,30,units="days",initial = 365*2)
+write.csv(fit.cv,"data/fit.cv.csv", row.names = FALSE)
+# read.csv("data/fit.cv.csv",header=TRUE)
+
+fit.cv %>% 
+  group_by(cutoff) %>% 
+  summarise(rmse=sqrt(mean((y-yhat)^2))) %>% 
+  ggplot(.,aes(x=cutoff,y=rmse)) +
+  geom_point() + geom_line()
+
+
