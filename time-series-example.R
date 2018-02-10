@@ -111,6 +111,7 @@ ggplot(dat,aes(date,resid)) +
 Acf(dat$resid, main="ACF of OLS Residuals")
 # residual plots look suspicious
 
+
 # Fit a random forest
 fit2 <- randomForest(pm2.5~inversion+wind+precip,data=dat[!is.na(dat$pm2.5),], ntree=500)
 dat$rf.resid[!is.na(dat$pm2.5)] <- fit2$predicted - dat$pm2.5[!is.na(dat$pm2.5)]
@@ -123,6 +124,7 @@ ggplot(dat,aes(date,rf.resid)) +
 
 
 Acf(dat$rf.resid, main="ACF of RF Residuals")
+Pacf(dat$rf.resid, main="PACF of RF Residuals")
 
 plot(sqrt(fit2$mse),type="l")
 round(sqrt(fit2$mse[500]),2)
@@ -181,7 +183,7 @@ ggplot(ets.mod,aes(day,resid)) +
 # TBATS model with weekly and yearly seasonality
 dat.ts2 <- msts(dat[!is.na(dat$pm2.5),5], seasonal.periods=c(7,365.25))
 fit5 <- tbats(dat.ts2)
-fc5 <- forecast(fit5)
+fc5 <- forecast(fit5,h=30)
 plot(fc5)
 
 
@@ -246,16 +248,136 @@ ggplot(fpred,aes(ds,resid)) +
 plot(fit6, forecast)
 prophet_plot_components(fit6, forecast)
 
+years <- 3
 
-
-fit.cv <- cross_validation(fit6,30,units="days",initial = 365*2)
+fit.cv <- cross_validation(fit6,30,units="days",initial = 365*years)
+fit.cv$day <- as.numeric(fit.cv$ds - fit.cv$cutoff)
 write.csv(fit.cv,"data/fit.cv.csv", row.names = FALSE)
+
+dats <- unique(fit.cv$cutoff)
+# Regression
+reg.cv <- NULL
+for (i in 1:length(dats)){
+  j = dats[i]
+  tmp.fit <- lm(pm2.5~inversion+wind+precip,data=dat[dat$date<=j & dat$date>(j-years*365*60*60*24),])
+  tmp.fcst <- dat[dat$date>j & dat$date<=(j+30*60*60*24),]
+  tmp.fcst$yhat <- predict(tmp.fit,newdata = tmp.fcst)
+  tmp.fcst$cutoff <- j
+  reg.cv <- rbind(reg.cv,tmp.fcst)
+}
+
+# Random Forests
+rf.cv <- NULL
+for (i in 1:length(dats)){
+  j = dats[i]
+  tmp.fit <- randomForest(pm2.5~inversion+wind+precip,
+                          data=dat[dat$date<=j & dat$date>(j-years*365*60*60*24) & !is.na(dat$pm2.5),],
+                          ntree=500)
+  tmp.fcst <- dat[dat$date>j & dat$date<=(j+30*60*60*24),]
+  tmp.fcst$yhat <- predict(tmp.fit,newdata = tmp.fcst)
+  tmp.fcst$cutoff <- j
+  rf.cv <- rbind(rf.cv,tmp.fcst)
+}
+
+# ETS
+ets.cv <- NULL
+for (i in which(as.POSIXct(dat$date) %in% dats)){
+  # i=741
+  xshort <- window(dat.ts,start=(i-years*365+1)/7,end=i/7)
+  tmp.fit <- ets(xshort,model = "MAN")
+  fcst <- predict(tmp.fit, h=30)
+  tmp.fcst <- data.frame(fcst)
+  tmp.fcst$date <- dat$date[(i+1):(i+30)]
+  tmp.fcst$cutoff <- dat$date[i]
+  tmp.fcst$y <- dat$pm2.5[(i+1):(i+30)]
+  ets.cv <- rbind(ets.cv,tmp.fcst)
+}
+
+# tbats.cv <- tsCV(dat.ts2,tbats,h=30,window = 2*365)
+
+# TBATS
+tbats.cv <- NULL
+for (i in which(as.POSIXct(dat$date) %in% dats)){
+  # i=741
+  xshort <- window(dat.ts2,start=1+(i-years*365)/365.25,end=1+i/365.25)
+  tmp.fit <- tbats(xshort,
+                   bc.lower = .4, bc.upper = .5,
+                   max.p =0, max.q=4,
+                   seasonal.periods = c(7,365.25))
+  fcst <- predict(tmp.fit, h=30)
+  tmp.fcst <- data.frame(fcst)
+  tmp.fcst$date <- dat$date[(i+1):(i+30)]
+  tmp.fcst$cutoff <- dat$date[i]
+  tmp.fcst$y <- dat$pm2.5[(i+1):(i+30)]
+  tbats.cv <- rbind(tbats.cv,tmp.fcst)
+}
+
+# ARIMA 
+arima.cv <- NULL
+for (i in which(as.POSIXct(dat$date) %in% dats)){
+  # i=741
+  regs <- dat[(i-2*365):i,2:4]
+  xshort <- msts(dat[(i-2*365):i,5], seasonal.periods=c(7,365.25))
+  fregs <- dat[(i+1):(i+30),2:4]
+  
+  z <- fourier(xshort, K=c(2,5))
+  zf <- fourier(xshort, K=c(2,5), h=30)
+  tmp.fit <- arima(sqrt(xshort), order = c(7,0,1), xreg = cbind(z,regs), seasonal=c(0,0,0))
+  fcst <- predict(tmp.fit, newxreg=cbind(zf,fregs), h=30)
+  tmp.fcst <- data.frame(yhat=as.numeric(fcst$pred^2))
+  tmp.fcst$date <- dat$date[(i+1):(i+30)]
+  tmp.fcst$cutoff <- dat$date[i]
+  tmp.fcst$y <- dat$pm2.5[(i+1):(i+30)]
+  arima.cv <- rbind(arima.cv,tmp.fcst)
+}
+
+
+# Combine forecasts to make comparisons
+reg.cv2 <- reg.cv %>% 
+  mutate(cutoff=as.Date(cutoff),day=as.numeric(date-cutoff),model="Linear Regression") %>% 
+  select(date,y=pm2.5,yhat,cutoff,day,model)
+
+rf.cv2 <- rf.cv %>% 
+  mutate(cutoff=as.Date(cutoff),day=as.numeric(date-cutoff),model="Random Forest") %>% 
+  select(date,y=pm2.5,yhat,cutoff,day,model)
+
+ets.cv2 <- ets.cv %>% 
+  mutate(day=as.numeric(date-cutoff),model="Exponential Smoothing") %>% 
+  select(date,y,yhat=Point.Forecast,cutoff,day,model)
+
+tbats.cv2 <- tbats.cv %>% 
+  mutate(day=as.numeric(date-cutoff),model="TBATS") %>% 
+  select(date,y,yhat=Point.Forecast,cutoff,day,model)
+
+
+arima.cv2 <- arima.cv %>% 
+  mutate(day=as.numeric(date-cutoff),model="ARIMA") %>% 
+  select(date,y,yhat,cutoff,day,model)
+
+fit.cv2 <- fit.cv %>% 
+  mutate(date=as.Date(ds),cutoff=as.Date(cutoff), day=as.numeric(date-cutoff),model="prophet") %>% 
+  select(date,y,yhat,cutoff,day,model)
+
+all.cv <- bind_rows(reg.cv2,rf.cv2,ets.cv2,tbats.cv2,arima.cv2,fit.cv2)
+
 # read.csv("data/fit.cv.csv",header=TRUE)
 
-fit.cv %>% 
-  group_by(cutoff) %>% 
+all.cv %>% 
+  group_by(model,cutoff) %>% 
   summarise(rmse=sqrt(mean((y-yhat)^2))) %>% 
-  ggplot(.,aes(x=cutoff,y=rmse)) +
+  ggplot(.,aes(x=cutoff,y=rmse,group=model,color=model)) +
+  geom_point() + geom_line()
+
+all.cv %>% 
+  group_by(model,day) %>% 
+  summarise(rmse=sqrt(mean((y-yhat)^2))) %>% 
+  ggplot(.,aes(x=day,y=rmse,group=model,color=model)) +
   geom_point() + geom_line()
 
 
+ggplot(all.cv,aes(date,yhat,group=as.factor(cutoff),color=as.factor(cutoff)))+
+  geom_line()+geom_point()+
+  geom_line(aes(y=y),color="black",alpha=.15)+geom_point(aes(y=y),color="black",alpha=.15)+
+  facet_wrap(~model)+ guides(color="none")
+
+write.csv(all.cv,"data/all.cv.csv",row.names = F)
