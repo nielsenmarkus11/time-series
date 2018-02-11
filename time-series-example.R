@@ -119,12 +119,19 @@ summary(fit1)
 dat$resid[!is.na(dat$pm2.5)] <- resid(fit1)
 
 # Plot the residuals
+jpeg("/mnt/c/Users/nielsen-laptop/Documents/reg-resid.jpg",height=4.25,width=5.5,res=200
+     ,units = "in")
 ggplot(dat,aes(date,resid)) + 
   geom_point() + geom_smooth() +
   ggtitle("Linear Regression Residuals",
           subtitle = paste0("RMSE: ",round(sqrt(mean(dat$resid^2,na.rm=TRUE)),2)))
+dev.off()
 
+
+jpeg("/mnt/c/Users/nielsen-laptop/Documents/reg-acf.jpg",height=4.25,width=5.5,res=200
+     ,units = "in")
 Acf(dat$resid, main="ACF of OLS Residuals")
+dev.off()
 # residual plots look suspicious
 
 
@@ -133,11 +140,13 @@ fit2 <- randomForest(sqrt(pm2.5)~inversion+wind+precip+fireworks,data=dat[!is.na
 dat$rf.resid[!is.na(dat$pm2.5)] <- fit2$predicted - sqrt(dat$pm2.5[!is.na(dat$pm2.5)])
 
 # Plot the residuals
+jpeg("/mnt/c/Users/nielsen-laptop/Documents/rf-resid.jpg",height=4.25,width=5.5,res=200
+     ,units = "in")
 ggplot(dat,aes(date,rf.resid)) + 
   geom_point() + geom_smooth() +
   ggtitle("Random Forest Residuals",
           subtitle = paste0("RMSE: ",round(sqrt(fit2$mse[500]),2)))
-
+dev.off()
 
 Acf(dat$rf.resid, main="ACF of RF Residuals")
 Pacf(dat$rf.resid, main="PACF of RF Residuals")
@@ -147,6 +156,8 @@ round(sqrt(fit2$mse[500]),2)
 # Better but we still have some odd things going on in our data
 
 # Zoom In
+jpeg("/mnt/c/Users/nielsen-laptop/Documents/rf-zoom.jpg",height=4.25,width=5.5,res=200
+     ,units = "in")
 p1 <- ggplot(dat,aes(date,rf.resid)) + 
   geom_point() + geom_line() +
   xlim(as.Date(c("2014-01-01","2014-02-28"))) + 
@@ -159,6 +170,7 @@ p2 <- ggplot(dat,aes(date,rf.resid)) +
 
 
 grid.arrange(p1, p2, ncol=2, top="Zoom-in of Random Forest Residuals")
+dev.off()
 
 # time series with 7 day seasonality
 dat.ts <- sqrt(ts(dat[,"pm2.5"], frequency = 7))
@@ -181,15 +193,17 @@ ets.mod <- rbind(data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals
                  data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit4b)), type="Multiplicative"))
 
 
+jpeg("/mnt/c/Users/nielsen-laptop/Documents/ets-resid.jpg",height=4.25,width=5.5,res=200
+     ,units = "in")
 ggplot(ets.mod,aes(day,resid)) + 
   geom_point() + geom_smooth() + 
   facet_grid(type~.,scales="free")+
-  ggtitle("Exponential Smoothing Model Residuals with Weekly Seasonality",
+  ggtitle("ETS Residuals with Weekly Seasonality",
           subtitle = paste0("Auto RMSE: ",round(sqrt(fit3$mse),2),
                             "   Additive RMSE: ",round(sqrt(fit4a$mse),2),
                             "   Multiplicative RMSE: ",round(sqrt(fit4b$mse),2)))
 
-
+dev.off()
 
 
 # TBATS model with weekly and yearly seasonality
@@ -200,15 +214,17 @@ fc5 <- forecast(fit5,h=30)
 plot(fc5)
 
 
+jpeg("/mnt/c/Users/nielsen-laptop/Documents/tbats-resid.jpg",height=4.25,width=5.5,res=200
+     ,units = "in")
 tbats.mod <- data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit5)))
 ggplot(tbats.mod,aes(day,resid)) + 
   geom_point() + geom_smooth() + 
-  ggtitle("TBATS Model Residuals with Weekly and Yearly Seasonality",
+  ggtitle("TBATS Resids with Dual Seasonality",
           subtitle = paste0("Auto RMSE: ",round(sqrt(mean((residuals(fit5))^2)),2)))
-
+dev.off()
 
 # ARIMA with weekly and yearly seasonality with regressors
-regs <- dat[!is.na(dat$pm2.5),c("precip","wind","inversion_diff","fireworks")]
+regs <- dat[!is.na(dat$pm2.5),c("precip","wind","inversion","fireworks")]
 
 # Forecast weather
 weather.ts <- msts(dat[,c("precip","wind","inversion_diff")],seasonal.periods = c(7,365.25))
@@ -228,11 +244,14 @@ fc <- forecast(fit, xreg=cbind(zf,fregs), h=25)
 plot(fc,xlim=c(4.8,5.2))
 
 arima.mod <- data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit)))
+
+jpeg("/mnt/c/Users/nielsen-laptop/Documents/arima-resid.jpg",height=4.25,width=5.5,res=200
+     ,units = "in")
 ggplot(arima.mod,aes(day,resid)) + 
   geom_point() + geom_smooth() + 
-  ggtitle("Arima Model Residuals with Seasonality and Regressors",
+  ggtitle("Arima Resids with Seasonality and Regressors",
           subtitle = paste0("RMSE: ",round(sqrt(mean((residuals(fit))^2)),2)))
-
+dev.off()
 
 
 # prophet
@@ -279,11 +298,13 @@ fpred <- pdat %>% left_join(fpred,by="ds")
 fpred$resid <- fpred$y - fpred$yhat
 
 
+jpeg("/mnt/c/Users/nielsen-laptop/Documents/prophet-resid.jpg",height=4.25,width=5.5,res=200
+     ,units = "in")
 ggplot(fpred,aes(ds,resid)) + 
   geom_point() + geom_smooth() + 
   ggtitle("Prophet with Seasonality and Regressors",
           subtitle = paste0("RMSE: ",round(sqrt(mean(fpred$resid^2)),2)))
-
+dev.off()
 
 plot(fit6, forecast)
 prophet_plot_components(fit6, forecast)
@@ -361,8 +382,8 @@ for (i in which(as.POSIXct(dat$date) %in% dats)){
 arima.cv <- NULL
 for (i in which(as.POSIXct(dat$date) %in% dats)){
   # i=741
-  regs <- dat[(i-2*365):i,c("precip","wind","inversion_diff","fireworks")]
-  xshort <- sqrt(msts(dat[(i-2*365):i,"pm2.5"], seasonal.periods=c(7,365.25)))
+  regs <- dat[(i-2*365):i,c("precip","wind","inversion","fireworks")]
+  xshort <- msts(dat[(i-2*365):i,"pm2.5"], seasonal.periods=c(7,365.25))
   
   # Forecast weather
   weather.ts <- msts(dat[(i-2*365):i,c("precip","wind","inversion_diff")],
@@ -381,7 +402,7 @@ for (i in which(as.POSIXct(dat$date) %in% dats)){
   
   z <- fourier(xshort, K=c(2,5))
   zf <- fourier(xshort, K=c(2,5), h=30)
-  tmp.fit <- arima(xshort, order = c(1,0,2), xreg = cbind(z,regs), seasonal=c(0,0,0))
+  tmp.fit <- arima(sqrt(xshort), order = c(1,0,2), xreg = cbind(z,regs), seasonal=c(0,0,0))
   fcst <- predict(tmp.fit, newxreg=cbind(zf,fregs), h=30)
   tmp.fcst <- data.frame(yhat=as.numeric(fcst$pred^2))
   tmp.fcst$date <- dat$date[(i+1):(i+30)]
@@ -450,12 +471,12 @@ rf.cv2 <- rf.cv %>%
   select(date,y=pm2.5,yhat,cutoff,day,model)
 
 ets.cv2 <- ets.cv %>% 
-  mutate(day=as.numeric(date-cutoff),model="Exponential Smoothing") %>% 
-  select(date,y=y^2,yhat=Point.Forecast^2,cutoff,day,model)
+  mutate(day=as.numeric(date-cutoff), yhat=Point.Forecast^2,model="Exponential Smoothing") %>% 
+  select(date,y,yhat,cutoff,day,model)
 
 tbats.cv2 <- tbats.cv %>% 
-  mutate(day=as.numeric(date-cutoff),model="TBATS") %>% 
-  select(date,y,yhat=Point.Forecast^2,cutoff,day,model)
+  mutate(day=as.numeric(date-cutoff), yhat=Point.Forecast^2,model="TBATS") %>% 
+  select(date,y,yhat,cutoff,day,model)
 
 
 arima.cv2 <- arima.cv %>% 
@@ -476,24 +497,38 @@ all.cv <- bind_rows(reg.cv2,rf.cv2,ets.cv2,tbats.cv2,arima.cv2,prophet.cv2)
 
 # read.csv("data/fit.cv.csv",header=TRUE)
 
+jpeg("/mnt/c/Users/nielsen-laptop/Documents/comp-cutoff.jpg",height=4.25,width=5.5,res=200
+     ,units = "in")
 all.cv %>% 
   group_by(model,cutoff) %>% 
   summarise(rmse=sqrt(mean((y-yhat)^2))) %>% 
   ggplot(.,aes(x=cutoff,y=rmse,group=model,color=model)) +
-  geom_line(alpha=.75) + geom_point(alpha=.75)
+  geom_line(alpha=.75) + geom_point(alpha=.75) +
+  theme(legend.position = "bottom")
+dev.off()
 
+
+jpeg("/mnt/c/Users/nielsen-laptop/Documents/comp-horizon.jpg",height=4.25,width=5.5,res=200
+     ,units = "in")
 all.cv %>% 
   group_by(model,day) %>% 
   summarise(rmse=sqrt(mean((y-yhat)^2))) %>% 
   ggplot(.,aes(x=day,y=rmse,group=model,color=model)) +
-  geom_line(alpha=.75) + geom_point(alpha=.75)
+  geom_line(alpha=.75) + geom_point(alpha=.75) +
+  theme(legend.position = "bottom")
+dev.off()
 
 
+jpeg("/mnt/c/Users/nielsen-laptop/Documents/comp-all.jpg",height=4.25,width=7.5,res=200
+     ,units = "in")
 ggplot(all.cv,aes(date,yhat,group=as.factor(cutoff),color=as.factor(cutoff)))+
   geom_line()+
   geom_line(aes(y=y),color="black",alpha=.15)+#geom_point(aes(y=y),color="black",alpha=.15)+
-  facet_wrap(~model)+ guides(color="none")
-
+  facet_wrap(~model)+ guides(color="none") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+dev.off()
 
 # Output for shiny
 save(list=c("weather","pm25","inversion","dat","all.cv","tbats.mod","ets.mod","arima.mod","fpred"),

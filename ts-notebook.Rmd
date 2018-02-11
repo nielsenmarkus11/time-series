@@ -1,0 +1,230 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(gridExtra)
+library(leaflet)
+library(lubridate)
+library(randomForest)
+library(forecast)
+library(prophet)
+
+load("data/ts-dat.Rdat")
+```
+
+## Regression
+```{r reg}
+fit1 <- lm(sqrt(pm2.5)~inversion+wind+precip+fireworks,data=dat)
+summary(fit1)
+
+dat$resid[!is.na(dat$pm2.5)] <- resid(fit1)
+
+# Plot the residuals
+ggplot(dat,aes(date,resid)) + 
+  geom_point() + geom_smooth() +
+  ggtitle("Linear Regression Residuals",
+          subtitle = paste0("RMSE: ",round(sqrt(mean(dat$resid^2,na.rm=TRUE)),2)))
+
+Acf(dat$resid, main="ACF of OLS Residuals")
+```
+
+
+## Random Forest
+```{r}
+fit2 <- randomForest(sqrt(pm2.5)~inversion+wind+precip+fireworks,data=dat[!is.na(dat$pm2.5),], ntree=500)
+dat$rf.resid[!is.na(dat$pm2.5)] <- fit2$predicted - sqrt(dat$pm2.5[!is.na(dat$pm2.5)])
+
+# Plot the residuals
+ggplot(dat,aes(date,rf.resid)) + 
+  geom_point() + geom_smooth() +
+  ggtitle("Random Forest Residuals",
+          subtitle = paste0("RMSE: ",round(sqrt(fit2$mse[500]),2)))
+# Better but we still have some odd things going on in our data
+
+# Zoom In
+p1 <- ggplot(dat,aes(date,rf.resid)) + 
+  geom_point() + geom_line() +
+  xlim(as.Date(c("2014-01-01","2014-02-28"))) + 
+  geom_abline(slope=0, intercept = 0, lty=2, col = "blue", lwd = 1.25)
+
+p2 <- ggplot(dat,aes(date,rf.resid)) + 
+  geom_point() + geom_line() +
+  xlim(as.Date(c("2017-11-01","2017-12-31"))) + 
+  geom_abline(slope=0, intercept = 0, lty=2, col = "blue", lwd = 1.25)
+
+
+grid.arrange(p1, p2, ncol=2, top="Zoom-in of Random Forest Residuals")
+
+```
+
+## Exponential Smoothing
+```{r}
+dat.ts <- sqrt(ts(dat[,"pm2.5"], frequency = 7))
+
+# Exponential smoothing model with weekly seasonality
+fit3 <- ets(dat.ts)
+fit4a <- ets(dat.ts,model ="AAA")
+fit4b <- ets(dat.ts,model ="MMM")
+
+ets.mod <- rbind(data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit3)), type="Auto"),
+                 data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit4a)), type="Additive"),
+                 data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit4b)), type="Multiplicative"))
+
+
+ggplot(ets.mod,aes(day,resid)) + 
+  geom_point() + geom_smooth() + 
+  facet_grid(type~.,scales="free")+
+  ggtitle("ETS Residuals with Weekly Seasonality",
+          subtitle = paste0("Auto RMSE: ",round(sqrt(fit3$mse),2),
+                            "   Additive RMSE: ",round(sqrt(fit4a$mse),2),
+                            "   Multiplicative RMSE: ",round(sqrt(fit4b$mse),2)))
+
+```
+
+## TBATS
+```{r}
+# TBATS model with weekly and yearly seasonality
+dat.ts2 <- sqrt(msts(dat[!is.na(dat$pm2.5),"pm2.5"], seasonal.periods=c(7,365.25)))
+fit5 <- tbats(dat.ts2)
+
+tbats.mod <- data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit5)))
+ggplot(tbats.mod,aes(day,resid)) + 
+  geom_point() + geom_smooth() + 
+  ggtitle("TBATS Resids with Dual Seasonality",
+          subtitle = paste0("Auto RMSE: ",round(sqrt(mean((residuals(fit5))^2)),2)))
+```
+
+## ARIMA with Regressors
+```{r}
+# ARIMA with weekly and yearly seasonality with regressors
+regs <- dat[!is.na(dat$pm2.5),c("precip","wind","inversion_diff","fireworks")]
+
+# Forecast weather
+weather.ts <- msts(dat[,c("precip","wind","inversion_diff")],seasonal.periods = c(7,365.25))
+precip <- auto.arima(weather.ts[,1])
+fprecip <- as.numeric(data.frame(forecast(precip,h=25))$Point.Forecast)
+wind <- auto.arima(weather.ts[,2])
+fwind <- as.numeric(data.frame(forecast(wind,h=25))$Point.Forecast)
+inversion <- auto.arima(weather.ts[,3])
+finversion <- as.numeric(data.frame(forecast(inversion,h=25))$Point.Forecast)
+
+fregs <- data.frame(precip=fprecip,wind=fwind,inversion=as.numeric(finversion<0),fireworks=0)
+
+# Seasonality
+z <- fourier(dat.ts2, K=c(2,5))
+zf <- fourier(dat.ts2, K=c(2,5), h=25)
+
+# Fit the model
+fit <- auto.arima(dat.ts2, xreg=cbind(z,regs), seasonal=FALSE)
+
+# Predict Future Values
+fc <- forecast(fit, xreg=cbind(zf,fregs), h=25)
+plot(fc,xlim=c(4.8,5.2))
+
+# Plot the residuals
+arima.mod <- data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit)))
+
+ggplot(arima.mod,aes(day,resid)) + 
+  geom_point() + geom_smooth() + 
+  ggtitle("Arima Resids with Seasonality and Regressors",
+          subtitle = paste0("RMSE: ",round(sqrt(mean((residuals(fit))^2)),2)))
+```
+
+## prophet
+```{r}
+pdat <- data.frame(ds=dat$date,
+                   y=sqrt(dat$pm2.5),
+                   precip=dat$precip,
+                   wind=dat$wind,
+                   inversion_diff=dat$inversion_diff,
+                   inversion=dat$inversion_,
+                   fireworks=dat$fireworks)
+
+# Forecast weather
+pfdat <- data.frame(ds=max(dat$date) + 1:25)
+pprecip <- pdat %>% 
+  select(ds,y=precip) %>% 
+  prophet() %>%
+  predict(pfdat)
+
+pwind <- pdat %>% 
+  select(ds,y=wind) %>% 
+  prophet() %>%
+  predict(pfdat)
+
+pinversion <- pdat %>% 
+  select(ds,y=inversion_diff) %>% 
+  prophet() %>%
+  predict(pfdat)
+
+fdat <-  data.frame(ds=pfdat$ds,
+                    precip=pprecip$yhat,
+                    wind=pwind$yhat,
+                    inversion=as.numeric(pinversion$yhat<0),
+                    fireworks = 0)
+
+# Fit the model (Seasonality automatically determined)
+fit6 <- prophet() %>% 
+  add_regressor('precip') %>% 
+  add_regressor('wind') %>% 
+  add_regressor('inversion') %>% 
+  add_regressor('fireworks') %>% 
+  fit.prophet(pdat)
+
+# Forecast values
+forecast <- predict(fit6, fdat)
+fpred <- predict(fit6)
+fpred$ds <- as.Date(fpred$ds)
+fpred <- pdat %>% left_join(fpred,by="ds")
+fpred$resid <- fpred$y - fpred$yhat
+
+# Plot the residuals
+ggplot(fpred,aes(ds,resid)) + 
+  geom_point() + geom_smooth() + 
+  ggtitle("Prophet with Seasonality and Regressors",
+          subtitle = paste0("RMSE: ",round(sqrt(mean(fpred$resid^2)),2)))
+
+```
+
+## Comparison
+```{r}
+# RMSE by cutoff
+all.cv %>% 
+  group_by(model,cutoff) %>% 
+  summarise(rmse=sqrt(mean((y-yhat)^2))) %>% 
+  ggplot(.,aes(x=cutoff,y=rmse,group=model,color=model)) +
+  geom_line(alpha=.75) + geom_point(alpha=.75)
+
+# RMSE by horizon
+all.cv %>% 
+  group_by(model,day) %>% 
+  summarise(rmse=sqrt(mean((y-yhat)^2))) %>% 
+  ggplot(.,aes(x=day,y=rmse,group=model,color=model)) +
+  geom_line(alpha=.75) + geom_point(alpha=.75)
+
+# Prediction behaviors of different methods
+ggplot(all.cv,aes(date,yhat,group=as.factor(cutoff),color=as.factor(cutoff)))+
+  geom_line()+
+  geom_line(aes(y=y),color="black",alpha=.15)+#geom_point(aes(y=y),color="black",alpha=.15)+
+  facet_wrap(~model)+ guides(color="none") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
