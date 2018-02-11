@@ -21,11 +21,13 @@ pm25 %>%
   mutate(year=year(Date)) %>%
   group_by(AQS_SITE_ID,year) %>%
   summarise(cnt=n()) %>% 
-  arrange(AQS_SITE_ID,year)
+  arrange(AQS_SITE_ID,year) %>% 
+  print(n=40)
 
 # Get average by site, then by day
 pm25.smry <- pm25 %>% 
-  filter(AQS_SITE_ID!=490353013) %>% 
+  # Remove data from sensors that don't span entire time period
+  filter(!(AQS_SITE_ID %in% c(490353013,490450003))) %>% 
   group_by(AQS_SITE_ID,Date) %>% 
   summarise(pm2.5 = mean(Daily.Mean.PM2.5.Concentration)) %>% 
   ungroup() %>% 
@@ -33,8 +35,10 @@ pm25.smry <- pm25 %>%
   summarise(pm2.5 = mean(pm2.5))
 
 # Load weather data
-weather <- read.csv("data/2014-2017_Weather.csv")
-weather$DATE <- as.Date(weather$DATE,format="%Y-%m-%d")
+weather <- read.csv("data/2010-2017_Weather.csv")
+weather$DATE <- as.Date(weather$DATE,format="%Y-%m-%d") 
+weather <- weather %>% 
+  filter(DATE>as.Date("2013-12-31"))
 head(weather)
 
 
@@ -52,12 +56,15 @@ peak <- weather %>%
 
 inversion <- valley %>% 
   left_join(peak, by="date") %>% 
-  mutate(inversion=avg_valley_tmp-avg_peak_tmp) %>% 
+  mutate(inversion_diff=avg_valley_tmp-avg_peak_tmp,
+         inversion=as.numeric((avg_valley_tmp-avg_peak_tmp<0))) %>% 
   select(-avg_valley_tmp,-avg_peak_tmp)
 
 # Visualize sensor locations
 w.sensors <- weather %>% distinct(LATITUDE,LONGITUDE)
-pm.sensors <- pm25 %>% 
+pm.sensors <- pm25 %>%
+  # Remove data from sensors that don't span entire time period
+  filter(!(AQS_SITE_ID %in% c(490353013,490450003))) %>%
   distinct(AQS_SITE_ID,SITE_LATITUDE,SITE_LONGITUDE) %>% 
   rename(LATITUDE=SITE_LATITUDE, 
          LONGITUDE=SITE_LONGITUDE)
@@ -83,10 +90,19 @@ m
 dat <- inversion %>% 
   full_join(pm25.smry, by=c("date"="Date"))
 
-# Output data for presentation
-write.csv(dat,"data/pollution-ts.csv",row.names = FALSE)
+# Add July 4th and New Years holidays
+dat$fireworks <- ifelse(dat$date %in% dat$date[(month(dat$date)==7 & day(dat$date) %in% c(1:7,21:27))|
+                                               (month(dat$date)==1 & day(dat$date)==1)],
+                        1,0)
+
 
 Hmisc::describe(dat)
+
+# Find missing data
+dat[!complete.cases(dat),]
+# Fill in missing data
+dat$pm2.5[dat$date==as.Date("2015-04-02")]=mean(dat$pm2.5[dat$date %in% as.Date(c("2015-04-01","2015-04-03"))])
+
 
 # What is the relationship between variables
 pairs(dat[,-1])
@@ -97,7 +113,7 @@ lines(dat$date,dat$pm2.5,col='red')
 legend('topright',legend = c("Inversion","PM 2.5"), col=c("black","red"), lty=1)
 
 # Fit a linear model
-fit1 <- lm(pm2.5~inversion+wind+precip,data=dat)
+fit1 <- lm(sqrt(pm2.5)~inversion+wind+precip+fireworks,data=dat)
 summary(fit1)
 
 dat$resid[!is.na(dat$pm2.5)] <- resid(fit1)
@@ -113,8 +129,8 @@ Acf(dat$resid, main="ACF of OLS Residuals")
 
 
 # Fit a random forest
-fit2 <- randomForest(pm2.5~inversion+wind+precip,data=dat[!is.na(dat$pm2.5),], ntree=500)
-dat$rf.resid[!is.na(dat$pm2.5)] <- fit2$predicted - dat$pm2.5[!is.na(dat$pm2.5)]
+fit2 <- randomForest(sqrt(pm2.5)~inversion+wind+precip+fireworks,data=dat[!is.na(dat$pm2.5),], ntree=500)
+dat$rf.resid[!is.na(dat$pm2.5)] <- fit2$predicted - sqrt(dat$pm2.5[!is.na(dat$pm2.5)])
 
 # Plot the residuals
 ggplot(dat,aes(date,rf.resid)) + 
@@ -144,12 +160,8 @@ p2 <- ggplot(dat,aes(date,rf.resid)) +
 
 grid.arrange(p1, p2, ncol=2, top="Zoom-in of Random Forest Residuals")
 
-
-# Fill in missing data
-dat$pm2.5[dat$date==as.Date("2015-04-02")]=mean(dat$pm2.5[dat$date %in% as.Date(c("2015-04-01","2015-04-03"))])
-
 # time series with 7 day seasonality
-dat.ts <- ts(dat[,5], frequency = 7)
+dat.ts <- sqrt(ts(dat[,"pm2.5"], frequency = 7))
 plot(dat.ts)
 
 # Exponential smoothing model with weekly seasonality
@@ -181,8 +193,9 @@ ggplot(ets.mod,aes(day,resid)) +
 
 
 # TBATS model with weekly and yearly seasonality
-dat.ts2 <- msts(dat[!is.na(dat$pm2.5),5], seasonal.periods=c(7,365.25))
+dat.ts2 <- sqrt(msts(dat[!is.na(dat$pm2.5),"pm2.5"], seasonal.periods=c(7,365.25)))
 fit5 <- tbats(dat.ts2)
+plot(fit5)
 fc5 <- forecast(fit5,h=30)
 plot(fc5)
 
@@ -195,8 +208,18 @@ ggplot(tbats.mod,aes(day,resid)) +
 
 
 # ARIMA with weekly and yearly seasonality with regressors
-regs <- dat[!is.na(dat$pm2.5),2:4]
-fregs <- dat[is.na(dat$pm2.5) & complete.cases(dat[,2:4]),2:4]
+regs <- dat[!is.na(dat$pm2.5),c("precip","wind","inversion_diff","fireworks")]
+
+# Forecast weather
+weather.ts <- msts(dat[,c("precip","wind","inversion_diff")],seasonal.periods = c(7,365.25))
+precip <- auto.arima(weather.ts[,1])
+fprecip <- as.numeric(data.frame(forecast(precip,h=25))$Point.Forecast)
+wind <- auto.arima(weather.ts[,2])
+fwind <- as.numeric(data.frame(forecast(wind,h=25))$Point.Forecast)
+inversion <- auto.arima(weather.ts[,3])
+finversion <- as.numeric(data.frame(forecast(inversion,h=25))$Point.Forecast)
+
+fregs <- data.frame(precip=fprecip,wind=fwind,inversion=as.numeric(finversion<0),fireworks=0)
 
 z <- fourier(dat.ts2, K=c(2,5))
 zf <- fourier(dat.ts2, K=c(2,5), h=25)
@@ -214,23 +237,40 @@ ggplot(arima.mod,aes(day,resid)) +
 
 # prophet
 pdat <- data.frame(ds=dat$date,
-                   y=dat$pm2.5,
+                   y=sqrt(dat$pm2.5),
                    precip=dat$precip,
                    wind=dat$wind,
-                   inversion=dat$inversion)[!is.na(dat$pm2.5),]
-fdat <-  data.frame(ds=dat$date,
-                    y=dat$pm2.5,
-                    precip=dat$precip,
-                    wind=dat$wind,
-                    inversion=dat$inversion)[complete.cases(dat[,2:4]),]
+                   inversion_diff=dat$inversion_diff,
+                   inversion=dat$inversion_,
+                   fireworks=dat$fireworks)
+pfdat <- data.frame(ds=max(dat$date) + 1:25)
+pprecip <- pdat %>% 
+  select(ds,y=precip) %>% 
+  prophet() %>%
+  predict(pfdat)
+
+pwind <- pdat %>% 
+  select(ds,y=wind) %>% 
+  prophet() %>%
+  predict(pfdat)
+
+pinversion <- pdat %>% 
+  select(ds,y=inversion_diff) %>% 
+  prophet() %>%
+  predict(pfdat)
+
+fdat <-  data.frame(ds=pfdat$ds,
+                    precip=pprecip$yhat,
+                    wind=pwind$yhat,
+                    inversion=as.numeric(pinversion$yhat<0),
+                    fireworks = 0)
 
 fit6 <- prophet() %>% 
   add_regressor('precip') %>% 
   add_regressor('wind') %>% 
   add_regressor('inversion') %>% 
+  add_regressor('fireworks') %>% 
   fit.prophet(pdat)
-
-summary(fit6)
 
 forecast <- predict(fit6, fdat)
 fpred <- predict(fit6)
@@ -252,16 +292,18 @@ years <- 3
 
 fit.cv <- cross_validation(fit6,30,units="days",initial = 365*years)
 fit.cv$day <- as.numeric(fit.cv$ds - fit.cv$cutoff)
-write.csv(fit.cv,"data/fit.cv.csv", row.names = FALSE)
 
 dats <- unique(fit.cv$cutoff)
 # Regression
 reg.cv <- NULL
 for (i in 1:length(dats)){
   j = dats[i]
-  tmp.fit <- lm(pm2.5~inversion+wind+precip,data=dat[dat$date<=j & dat$date>(j-years*365*60*60*24),])
+  tmp.fit <- lm(sqrt(pm2.5)~inversion+wind+precip,data=dat[dat$date<=j & dat$date>(j-years*365*60*60*24),])
   tmp.fcst <- dat[dat$date>j & dat$date<=(j+30*60*60*24),]
-  tmp.fcst$yhat <- predict(tmp.fit,newdata = tmp.fcst)
+  tmp.fcst$inversion <- dat$inversion[dat$date==j]
+  tmp.fcst$wind <- dat$wind[dat$date==j]
+  tmp.fcst$precip <- dat$precip[dat$date==j]
+  tmp.fcst$yhat <- predict(tmp.fit,newdata = tmp.fcst)^2
   tmp.fcst$cutoff <- j
   reg.cv <- rbind(reg.cv,tmp.fcst)
 }
@@ -270,11 +312,14 @@ for (i in 1:length(dats)){
 rf.cv <- NULL
 for (i in 1:length(dats)){
   j = dats[i]
-  tmp.fit <- randomForest(pm2.5~inversion+wind+precip,
+  tmp.fit <- randomForest(sqrt(pm2.5)~inversion+wind+precip,
                           data=dat[dat$date<=j & dat$date>(j-years*365*60*60*24) & !is.na(dat$pm2.5),],
                           ntree=500)
   tmp.fcst <- dat[dat$date>j & dat$date<=(j+30*60*60*24),]
-  tmp.fcst$yhat <- predict(tmp.fit,newdata = tmp.fcst)
+  tmp.fcst$inversion <- dat$inversion[dat$date==j]
+  tmp.fcst$wind <- dat$wind[dat$date==j]
+  tmp.fcst$precip <- dat$precip[dat$date==j]
+  tmp.fcst$yhat <- predict(tmp.fit,newdata = tmp.fcst)^2
   tmp.fcst$cutoff <- j
   rf.cv <- rbind(rf.cv,tmp.fcst)
 }
@@ -316,13 +361,27 @@ for (i in which(as.POSIXct(dat$date) %in% dats)){
 arima.cv <- NULL
 for (i in which(as.POSIXct(dat$date) %in% dats)){
   # i=741
-  regs <- dat[(i-2*365):i,2:4]
-  xshort <- msts(dat[(i-2*365):i,5], seasonal.periods=c(7,365.25))
-  fregs <- dat[(i+1):(i+30),2:4]
+  regs <- dat[(i-2*365):i,c("precip","wind","inversion_diff","fireworks")]
+  xshort <- sqrt(msts(dat[(i-2*365):i,"pm2.5"], seasonal.periods=c(7,365.25)))
+  
+  # Forecast weather
+  weather.ts <- msts(dat[(i-2*365):i,c("precip","wind","inversion_diff")],
+                     seasonal.periods = c(7,365.25))
+  precip <- auto.arima(weather.ts[,1])
+  fprecip <- as.numeric(data.frame(forecast(precip,h=30))$Point.Forecast)
+  wind <- auto.arima(weather.ts[,2])
+  fwind <- as.numeric(data.frame(forecast(wind,h=30))$Point.Forecast)
+  inversion <- auto.arima(weather.ts[,3])
+  finversion <- as.numeric(data.frame(forecast(inversion,h=30))$Point.Forecast)
+  
+  fregs <- data.frame(precip=fprecip,
+                      wind=fwind,
+                      inversion=as.numeric(finversion<0),
+                      fireworks=dat$fireworks[(i+1):(i+30)])
   
   z <- fourier(xshort, K=c(2,5))
   zf <- fourier(xshort, K=c(2,5), h=30)
-  tmp.fit <- arima(sqrt(xshort), order = c(7,0,1), xreg = cbind(z,regs), seasonal=c(0,0,0))
+  tmp.fit <- arima(xshort, order = c(1,0,2), xreg = cbind(z,regs), seasonal=c(0,0,0))
   fcst <- predict(tmp.fit, newxreg=cbind(zf,fregs), h=30)
   tmp.fcst <- data.frame(yhat=as.numeric(fcst$pred^2))
   tmp.fcst$date <- dat$date[(i+1):(i+30)]
@@ -331,6 +390,55 @@ for (i in which(as.POSIXct(dat$date) %in% dats)){
   arima.cv <- rbind(arima.cv,tmp.fcst)
 }
 
+# prophet
+prophet.cv <- NULL
+for (i in 1:length(dats)){
+  # i=1
+  j = dats[i]
+  pdat <- data.frame(ds=dat$date,
+                     y=sqrt(dat$pm2.5),
+                     precip=dat$precip,
+                     wind=dat$wind,
+                     inversion_diff=dat$inversion_diff,
+                     inversion=dat$inversion,
+                     fireworks=dat$fireworks)[dat$date<=j & dat$date>(j-years*365*60*60*24),]
+  pfdat <- data.frame(ds=j + 1:30*60*60*24)
+  pprecip <- pdat %>% 
+    select(ds,y=precip) %>% 
+    prophet() %>%
+    predict(pfdat)
+  
+  pwind <- pdat %>% 
+    select(ds,y=wind) %>% 
+    prophet() %>%
+    predict(pfdat)
+  
+  pinversion <- pdat %>% 
+    select(ds,y=inversion_diff) %>% 
+    prophet() %>%
+    predict(pfdat)
+  
+  fdat <-  data.frame(ds=pfdat$ds,
+                      y=dat$pm2.5[dat$date>j & dat$date<=(j+30*60*60*24)],
+                      precip=pprecip$yhat,
+                      wind=pwind$yhat,
+                      inversion=as.numeric(pinversion$yhat<0),
+                      fireworks = dat$fireworks[dat$date>j & dat$date<=(j+30*60*60*24)])
+  
+  fit6 <- prophet() %>% 
+    add_regressor('precip') %>% 
+    add_regressor('wind') %>% 
+    add_regressor('inversion') %>% 
+    add_regressor('fireworks') %>% 
+    fit.prophet(pdat)
+  
+  forecast <- predict(fit6, fdat)
+  forecast$ds <- as.Date(forecast$ds)
+  fdat$ds <- as.Date(fdat$ds)
+  forecast <- fdat %>% left_join(forecast,by="ds")
+  forecast$cutoff <- j
+  prophet.cv <- rbind(prophet.cv,forecast)
+}
 
 # Combine forecasts to make comparisons
 reg.cv2 <- reg.cv %>% 
@@ -343,11 +451,11 @@ rf.cv2 <- rf.cv %>%
 
 ets.cv2 <- ets.cv %>% 
   mutate(day=as.numeric(date-cutoff),model="Exponential Smoothing") %>% 
-  select(date,y,yhat=Point.Forecast,cutoff,day,model)
+  select(date,y=y^2,yhat=Point.Forecast^2,cutoff,day,model)
 
 tbats.cv2 <- tbats.cv %>% 
   mutate(day=as.numeric(date-cutoff),model="TBATS") %>% 
-  select(date,y,yhat=Point.Forecast,cutoff,day,model)
+  select(date,y,yhat=Point.Forecast^2,cutoff,day,model)
 
 
 arima.cv2 <- arima.cv %>% 
@@ -355,10 +463,16 @@ arima.cv2 <- arima.cv %>%
   select(date,y,yhat,cutoff,day,model)
 
 fit.cv2 <- fit.cv %>% 
-  mutate(date=as.Date(ds),cutoff=as.Date(cutoff), day=as.numeric(date-cutoff),model="prophet") %>% 
+  mutate(date=as.Date(ds),cutoff=as.Date(cutoff), y=y^2, yhat=yhat^2,
+         day=as.numeric(date-cutoff),model="prophet") %>% 
   select(date,y,yhat,cutoff,day,model)
 
-all.cv <- bind_rows(reg.cv2,rf.cv2,ets.cv2,tbats.cv2,arima.cv2,fit.cv2)
+prophet.cv2 <- prophet.cv %>% 
+  mutate(date=as.Date(ds),cutoff=as.Date(cutoff), yhat=yhat^2, 
+         day=as.numeric(date-cutoff),model="prophet") %>% 
+  select(date,y,yhat,cutoff,day,model)
+
+all.cv <- bind_rows(reg.cv2,rf.cv2,ets.cv2,tbats.cv2,arima.cv2,prophet.cv2)
 
 # read.csv("data/fit.cv.csv",header=TRUE)
 
@@ -366,18 +480,21 @@ all.cv %>%
   group_by(model,cutoff) %>% 
   summarise(rmse=sqrt(mean((y-yhat)^2))) %>% 
   ggplot(.,aes(x=cutoff,y=rmse,group=model,color=model)) +
-  geom_point() + geom_line()
+  geom_line(alpha=.75) + geom_point(alpha=.75)
 
 all.cv %>% 
   group_by(model,day) %>% 
   summarise(rmse=sqrt(mean((y-yhat)^2))) %>% 
   ggplot(.,aes(x=day,y=rmse,group=model,color=model)) +
-  geom_point() + geom_line()
+  geom_line(alpha=.75) + geom_point(alpha=.75)
 
 
 ggplot(all.cv,aes(date,yhat,group=as.factor(cutoff),color=as.factor(cutoff)))+
-  geom_line()+geom_point()+
-  geom_line(aes(y=y),color="black",alpha=.15)+geom_point(aes(y=y),color="black",alpha=.15)+
+  geom_line()+
+  geom_line(aes(y=y),color="black",alpha=.15)+#geom_point(aes(y=y),color="black",alpha=.15)+
   facet_wrap(~model)+ guides(color="none")
 
-write.csv(all.cv,"data/all.cv.csv",row.names = F)
+
+# Output for shiny
+save(list=c("weather","pm25","inversion","dat","all.cv","tbats.mod","ets.mod","arima.mod","fpred"),
+     file="data/ts-dat.Rdat")
