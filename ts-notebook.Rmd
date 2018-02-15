@@ -7,8 +7,8 @@ output: html_notebook
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 library(tidyverse)
 library(gridExtra)
-library(leaflet)
 library(lubridate)
+
 library(randomForest)
 library(forecast)
 library(prophet)
@@ -16,7 +16,7 @@ library(prophet)
 load("data/ts-dat.Rdat")
 ```
 
-## Regression
+## OLS Regression
 ```{r reg}
 fit1 <- lm(sqrt(pm2.5)~inversion+wind+precip+fireworks,data=dat)
 summary(fit1)
@@ -33,7 +33,7 @@ Acf(dat$resid, main="ACF of OLS Residuals")
 ```
 
 
-## Random Forest
+## Random Forest Regression
 ```{r}
 fit2 <- randomForest(sqrt(pm2.5)~inversion+wind+precip+fireworks,data=dat[!is.na(dat$pm2.5),], ntree=500)
 dat$rf.resid[!is.na(dat$pm2.5)] <- fit2$predicted - sqrt(dat$pm2.5[!is.na(dat$pm2.5)])
@@ -63,18 +63,23 @@ grid.arrange(p1, p2, ncol=2, top="Zoom-in of Random Forest Residuals")
 
 ## Exponential Smoothing
 ```{r}
+# Convert to time series data
 dat.ts <- sqrt(ts(dat[,"pm2.5"], frequency = 7))
 
 # Exponential smoothing model with weekly seasonality
-fit3 <- ets(dat.ts)
-fit4a <- ets(dat.ts,model ="AAA")
-fit4b <- ets(dat.ts,model ="MMM")
+fit3 <- ets(dat.ts) # model = "MAN"
+fit4a <- ets(dat.ts, model ="AAA")
+fit4b <- ets(dat.ts, model ="MMM")
+# Fit models with all additive or all multiplicative features. First byte is for errors, second for trend, and third for seasonality
 
-ets.mod <- rbind(data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit3)), type="Auto"),
-                 data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit4a)), type="Additive"),
-                 data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit4b)), type="Multiplicative"))
+# Predict Future Values
+plot(predict(fit3,h=25),xlim=c(200,215))
 
+ets.mod <- rbind(data.frame(day=1:sum(!is.na(dat.ts)), resid=as.numeric(residuals(fit3)), type="Auto"),
+                 data.frame(day=1:sum(!is.na(dat.ts)), resid=as.numeric(residuals(fit4a)), type="Additive"),
+                 data.frame(day=1:sum(!is.na(dat.ts)), resid=as.numeric(residuals(fit4b)), type="Multiplicative"))
 
+# Compare the residuals of each model
 ggplot(ets.mod,aes(day,resid)) + 
   geom_point() + geom_smooth() + 
   facet_grid(type~.,scales="free")+
@@ -85,25 +90,31 @@ ggplot(ets.mod,aes(day,resid)) +
 
 ```
 
-## TBATS
+## TBATS (Trigonometric regressors, Box-Cox transformations, ARMA errors, Trend, Seasonality)
 ```{r}
 # TBATS model with weekly and yearly seasonality
 dat.ts2 <- sqrt(msts(dat[!is.na(dat$pm2.5),"pm2.5"], seasonal.periods=c(7,365.25)))
 fit5 <- tbats(dat.ts2)
+# This method takes the most time when comparing run time.
+# Down side on this is that you cannot set specific box-cox, ARMA, and fourier parameters.
 
-tbats.mod <- data.frame(day=1:sum(!is.na(dat.ts)),resid=as.numeric(residuals(fit5)))
+# Predict future values
+plot(predict(fit5, h=25),xlim=c(4.8,5.2))
+
+# Plot the residuals
+tbats.mod <- data.frame(day=1:sum(!is.na(dat.ts2)),resid=as.numeric(residuals(fit5)))
 ggplot(tbats.mod,aes(day,resid)) + 
   geom_point() + geom_smooth() + 
   ggtitle("TBATS Resids with Dual Seasonality",
           subtitle = paste0("Auto RMSE: ",round(sqrt(mean((residuals(fit5))^2)),2)))
 ```
 
-## ARIMA with Regressors
+## ARIMA with Regressors (AutoRegressive Integraged Moving Average)
 ```{r}
 # ARIMA with weekly and yearly seasonality with regressors
 regs <- dat[!is.na(dat$pm2.5),c("precip","wind","inversion_diff","fireworks")]
 
-# Forecast weather
+# Forecast weather regressors
 weather.ts <- msts(dat[,c("precip","wind","inversion_diff")],seasonal.periods = c(7,365.25))
 precip <- auto.arima(weather.ts[,1])
 fprecip <- as.numeric(data.frame(forecast(precip,h=25))$Point.Forecast)
@@ -122,6 +133,7 @@ zf <- fourier(dat.ts2, K=c(2,5), h=25)
 fit <- auto.arima(dat.ts2, xreg=cbind(z,regs), seasonal=FALSE)
 
 # Predict Future Values
+# This time we need future values of the regressors as well.
 fc <- forecast(fit, xreg=cbind(zf,fregs), h=25)
 plot(fc,xlim=c(4.8,5.2))
 
@@ -144,7 +156,7 @@ pdat <- data.frame(ds=dat$date,
                    inversion=dat$inversion_,
                    fireworks=dat$fireworks)
 
-# Forecast weather
+# Forecast weather regressors
 pfdat <- data.frame(ds=max(dat$date) + 1:25)
 pprecip <- pdat %>% 
   select(ds,y=precip) %>% 
@@ -175,8 +187,10 @@ fit6 <- prophet() %>%
   add_regressor('fireworks') %>% 
   fit.prophet(pdat)
 
-# Forecast values
+# Forecast future values
 forecast <- predict(fit6, fdat)
+
+# Get the residuals
 fpred <- predict(fit6)
 fpred$ds <- as.Date(fpred$ds)
 fpred <- pdat %>% left_join(fpred,by="ds")
@@ -190,7 +204,7 @@ ggplot(fpred,aes(ds,resid)) +
 
 ```
 
-## Comparison
+## Comparison (Show in PowerPoint)
 ```{r}
 # RMSE by cutoff
 all.cv %>% 
