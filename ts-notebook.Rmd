@@ -14,6 +14,7 @@ library(forecast)
 library(prophet)
 
 load("data/ts-dat.Rdat")
+dat
 ```
 
 ## OLS Regression
